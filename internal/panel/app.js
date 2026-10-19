@@ -453,6 +453,28 @@ function renderAccounts(list) {
   }).join('');
 }
 
+// renderProxyStat 出站代理池统计卡（账号池页 stats 栏）。
+// d 为 overview 的 proxy 字段：null = 未启用（直连）；启用时逐代理明细挂 tooltip。
+function renderProxyStat(d) {
+  const el = $('sProxy');
+  if (!el) return;
+  if (!d || !Array.isArray(d.proxies) || !d.proxies.length) {
+    el.textContent = '直连';
+    el.style.color = '';
+    const card = $('proxyStat');
+    if (card) card.title = '未配置出站代理（proxy.list 为空）';
+    return;
+  }
+  const ok = d.proxies.filter(p => p.pickable).length;
+  el.textContent = ok + '/' + d.proxies.length;
+  el.style.color = ok === 0 ? 'var(--bad)' : (ok < d.proxies.length ? 'var(--warn)' : 'var(--ok)');
+  const lines = d.proxies.map(p =>
+    p.raw + (p.frozen ? '（冷却至 ' + fmtLocalDateTime(parseAPITime(p.unfreeze_at)) + '）' : (p.pickable ? '' : ''))
+      + (p.recent_fails ? '  近期失败 ' + p.recent_fails : ''));
+  const card = $('proxyStat');
+  if (card) card.title = '累计选中 ' + (d.picks || 0) + ' 次\n' + lines.join('\n');
+}
+
 // renderModelLocks 模型锁池：哪些模型不能用、锁了几个号、还要锁多久。
 // 后端 model_locks 已按「整池不可用 → 没号可用 → 部分限流」排好序，这里只做展示。
 function renderModelLocks(rows) {
@@ -503,6 +525,8 @@ async function loadOverview(quiet) {
   const totSum = (d.accounts || []).reduce((a, s) => a + (s.credits_total || 0), 0);
   $('sCredits').textContent = totSum > 0 ? remSum + ' / ' + totSum : remSum;
     $('sSticky').textContent = d.sticky_sessions;
+    // 出站代理池卡片：未启用显示「直连」，启用显示 可用/总数 并把逐代理明细挂 tooltip。
+    renderProxyStat(d.proxy);
     $('navSub').textContent = 'v' + d.version;
     $('navVer').textContent = 'v' + d.version;
     $('navRedis').textContent = d.redis_mode === 'upstash' ? 'Redis 镜像' : '本地内存';
@@ -986,6 +1010,7 @@ const CFG_MAP = {
   idle_weight_per_hour: ['pool', 'idle_weight_per_hour'], idle_weight_max: ['pool', 'idle_weight_max'],
   ttl: ['session_sticky', 'ttl'],
   timeout_seconds: ['upstream', 'timeout_seconds'], header_timeout_seconds: ['upstream', 'header_timeout_seconds'],
+  proxy_list: ['proxy', 'list'],
   idle_timeout_seconds: ['upstream', 'idle_timeout_seconds'], user_agent: ['upstream', 'user_agent'],
   prompt_mode: ['prompt', 'mode'], prompt_file: ['prompt', 'file'],
   sanitize_blacklist_fingerprints: ['features', 'sanitize_blacklist_fingerprints'],
@@ -1023,6 +1048,7 @@ async function loadConfig() {
       if (!el) continue;
       const v = dig(cfgLoaded, path);
       if (el.type === 'checkbox') el.checked = !!v;
+      else if (name === 'proxy_list') el.value = Array.isArray(v) ? v.join('\n') : (v == null ? '' : String(v));
       else if (Array.isArray(v)) el.value = v.join(', ');
       else el.value = v == null ? '' : v;
     }
@@ -1037,6 +1063,10 @@ function collectConfig() {
     if (!el) continue;
     let v;
     if (el.type === 'checkbox') v = el.checked;
+    else if (name === 'proxy_list') {
+      // 代理列表按行拆分；全空时发送 []，明确清空配置。
+      v = el.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    }
     else if (el.type === 'number') { v = el.value.trim() === '' ? undefined : Number(el.value); }
     else {
       const raw = el.value.trim();

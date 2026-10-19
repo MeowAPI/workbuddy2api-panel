@@ -25,6 +25,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/proxypool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
@@ -65,6 +66,9 @@ type Config struct {
 	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
 	// 只读展示：网关不解析、不依赖其内容做任何路由/出站决策。
 	ProbeFile string
+
+	// ProxyPool 出站代理池（nil = 未启用，overview 的 proxy 字段为 null）。
+	ProxyPool *proxypool.Pool
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -253,8 +257,21 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久）：
 		// 与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
 		"model_locks": p.cfg.Pool.ModelLockView(),
+		// proxy 出站代理池状态（未启用为 null，前端显示「直连」）。
+		"proxy":       p.proxyOverview(),
 	})
 }
+
+// proxyOverview 代理池观测快照（overview 的 proxy 字段）。
+// nil/空池 → null（前端显示「直连」）；启用时返回逐代理状态与轮转计数。
+func (p *Panel) proxyOverview() any {
+	if !p.cfg.ProxyPool.Enabled() {
+		return nil
+	}
+	views, picks := p.cfg.ProxyPool.Snapshot()
+	return map[string]any{"proxies": views, "picks": picks}
+}
+
 
 // logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。
 func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {

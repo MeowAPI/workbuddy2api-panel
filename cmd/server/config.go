@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/proxypool"
 )
 
 // Config 顶层配置。
@@ -148,6 +149,14 @@ type Config struct {
 		// PassthroughIP 是否透传客户端 IP 给上游（默认 false，反代安全边界）。
 		PassthroughIP bool `json:"passthrough_ip"`
 	} `json:"upstream"`
+
+	Proxy struct {
+		// List 出站代理列表。每条支持 http://[user:pass@]host:port、
+		// socks5://[user:pass@]host:port、socks5h://[...]（域名解析交代理端）。
+		// 非空即启用代理池：按请求轮转，10 分钟内累计 3 次传输失败冷却 5 分钟。
+		// 全池冷却时请求失败，不回退直连。空列表 = 直连；修改列表需重启生效。
+		List []string `json:"list"`
+	} `json:"proxy"`
 
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
@@ -449,6 +458,10 @@ func applyEnv(c *Config) {
 			c.Pool.PreferExpiring = b
 		}
 	}
+	if v := os.Getenv("WB2A_PROXY_LIST"); v != "" {
+		// 逗号/分号分隔；凭据中的分隔符必须使用 URL 百分号编码。
+		c.Proxy.List = strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ';' })
+	}
 }
 
 func (c *Config) normalize() error {
@@ -593,6 +606,16 @@ func (c *Config) normalize() error {
 	}
 	if err := c.validateScheduleHours(); err != nil {
 		return err
+	}
+	// 代理池列表：逐条校验可解析（协议/host 完整），fail fast 而不是运行期
+	// 静默跳过——用户配了代理却永远直连，是最难排查的静默故障。
+	for _, raw := range c.Proxy.List {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		if _, err := proxypool.Parse(raw); err != nil {
+			return err
+		}
 	}
 	return c.normalizePrompt()
 }

@@ -719,6 +719,7 @@ process.stdout.write(JSON.stringify({
 //
 // 同时钉住反面：其余文本字段空串仍然不下发。这条同样重要——若哪天为了修上面那个
 // 问题改成"所有空串都发"，表单里任何一个没填的框都会变成"请清空"，静默抹掉配置。
+// proxy.list 则始终发送数组：清空发送 []，非空按行拆分，不改变其他 textarea 的语义。
 func TestAppJSCollectConfigClearable(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -737,6 +738,7 @@ const cfgForm = { elements: {
   user_agent: mk(''),
   prompt_file: mk(''),
   checkin_hours: mk(''),
+  proxy_list: { type: 'textarea', tagName: 'TEXTAREA', value: '' },
 }};
 const ctx = {
   Date, Number, String, Math, Map, Array, Object, isNaN, URLSearchParams, Set,
@@ -747,6 +749,17 @@ vm.createContext(ctx);
 vm.runInContext(src.slice(start, end) + '\nthis.collectConfig = collectConfig;', ctx);
 const out = ctx.collectConfig();
 const has = (o, k) => Object.prototype.hasOwnProperty.call(o || {}, k);
+const assert = require('assert/strict');
+const proxyList = () => JSON.parse(JSON.stringify(ctx.collectConfig().proxy.list));
+assert.deepEqual(proxyList(), []);
+cfgForm.elements.proxy_list.value = ' \r\n\t\n ';
+assert.deepEqual(proxyList(), []);
+cfgForm.elements.proxy_list.value = ' http://user:pass@127.0.0.1:7890 \r\n\n socks5h://host:1080 \n';
+assert.deepEqual(proxyList(), ['http://user:pass@127.0.0.1:7890', 'socks5h://host:1080']);
+cfgForm.elements.user_agent = { type: 'textarea', tagName: 'TEXTAREA', value: 'first\nsecond' };
+assert.equal(ctx.collectConfig().upstream.user_agent, 'first\nsecond');
+cfgForm.elements.user_agent.value = '';
+assert.equal(ctx.collectConfig().upstream.user_agent, '');
 process.stdout.write(JSON.stringify([
   has(out.upstream, 'user_agent'), (out.upstream || {}).user_agent,
   has(out.prompt, 'file'), (out.prompt || {}).file,

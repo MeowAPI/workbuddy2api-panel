@@ -165,11 +165,12 @@ button.xs { padding: 3.5px 9px; font-size: 12.5px; border-radius: 6px; white-spa
    header 里若不收窄会把同行 note 挤到换行——收成内容宽并压小外观，与 button.xs 同款。 */
 select.xs { width: auto; padding: 3.5px 9px; font-size: 12.5px; border-radius: 6px; }
 button.icon { padding: 7px 9px; }
-input, select {
+input, select, textarea {
   font: inherit; color: var(--ink); background: var(--surface-2);
   border: 1px solid var(--line); border-radius: 7px; padding: 7px 11px; width: 100%;
 }
-input:focus, select:focus { outline: none; border-color: var(--accent); }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+textarea { resize: vertical; }
 input.invalid { border-color: var(--bad); background: var(--bad-soft); }
 input.invalid:focus { border-color: var(--bad); }
 input[type=checkbox] { width: auto; accent-color: var(--accent); }
@@ -180,7 +181,7 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 
 /* ── 统计条（观测区）──────────────────────────────────────────────── */
 .stats {
-  display: grid; grid-template-columns: repeat(7, 1fr);
+  display: grid; grid-template-columns: repeat(8, 1fr);
   border: 1px solid var(--line); border-radius: 11px; background: var(--surface);
   overflow: hidden; margin-bottom: 20px; box-shadow: var(--shadow);
 }
@@ -647,6 +648,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div class="stat warn"><div class="v" id="sPaused">-</div><div class="k">已暂停选号</div></div>
         <div class="stat"><div class="v" id="sCredits">-</div><div class="k">积分剩余 / 总额</div></div>
         <div class="stat"><div class="v" id="sSticky">-</div><div class="k">粘性会话</div></div>
+        <div class="stat" id="proxyStat"><div class="v" id="sProxy">直连</div><div class="k">出站代理</div></div>
       </div>
 
       <!-- 卡片默认可见：此前 hidden + 「仅点检查才渲染」形成死锁（按钮藏在隐藏卡片里，
@@ -1047,6 +1049,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <span class="hint">影响官网积分记录「使用端」显示；需重启</span></label>
             </div>
             <div class="hr"></div>
+            <label class="fld"><span class="lb">出站代理池（每行一条，需重启生效）</span>
+              <textarea name="proxy_list" rows="3" placeholder="http://user:pass@127.0.0.1:7890&#10;socks5://127.0.0.1:1080&#10;socks5h://host:1080"></textarea>
+              <span class="hint">支持 http / https / socks5 / socks5h，带认证写 user:pass@，socks5h 由代理解析域名。非空即启用：出站请求按代理轮转，单代理 10 分钟内累计失败 3 次冷却 5 分钟；全池冷却时请求报错，不会回退直连。留空 = 直连（默认）。修改列表后需重启生效。</span></label>
             <div class="grid2">
               <label class="fld"><span class="lb">系统提示词模式</span>
                 <select name="prompt_mode">

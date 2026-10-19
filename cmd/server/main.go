@@ -21,6 +21,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/proxypool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
@@ -159,7 +160,18 @@ func main() {
 	up.DeviceToken = cfg.Upstream.DeviceToken
 	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
 	up.PassthroughIP = cfg.Upstream.PassthroughIP
-	// global realm 路由（config global 段）：上游侧开关（第一道闸）+ base 覆盖；
+	// 出站代理池（config proxy.list）：非空即接管 HTTP/ChatHTTP Transport，
+	// 按代理轮转出站；失败累计触发冷却，全池冷却时返回错误而不直连。必须位于上方
+	// HeaderTimeout 等 Transport 参数设置之后（SetProxyPool 以当时生效的
+	// Transport 为母本克隆各代理分身）。列表为空 = 直连现状，零行为变化。
+	proxyPool, err := proxypool.New(cfg.Proxy.List)
+	if err != nil {
+		log.Fatalf("load proxy pool: %v", err)
+	}
+	if proxyPool.Enabled() {
+		up.SetProxyPool(proxyPool)
+		log.Printf("出站代理池已启用：%d 条（按请求轮转；10 分钟内累计 3 次失败冷却 5 分钟；全池冷却时拒绝直连）", proxyPool.Len())
+	}
 	// auth 侧开关（auth.SetGlobalEnabled）是第二道闸，两者同 config global.enabled。
 	up.GlobalEnabled = cfg.Global.Enabled
 	up.ChatBaseGlobal = cfg.Global.ChatBase
@@ -278,6 +290,7 @@ func main() {
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
 		ConfigPath: *cfgPath,
+		ProxyPool:  proxyPool,
 		LoadConfig: func() (any, error) {
 			return Load(*cfgPath)
 		},
@@ -531,6 +544,8 @@ func restartRequiredFields(c *Config) []string {
 	if c.Upstash.URL != "" || c.Upstash.Token != "" {
 		out = append(out, "upstash")
 	}
+	// proxy.list 在装配期接管 Transport（SetProxyPool 克隆母本），改列表需重启。
+	out = append(out, "proxy.list")
 	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
 	out = append(out, "logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb")
 	out = append(out, "server.read_timeout")
