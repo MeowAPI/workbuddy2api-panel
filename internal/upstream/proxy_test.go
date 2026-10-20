@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/proxypool"
 )
 
@@ -483,5 +484,71 @@ func TestProxyBusinessStatusesDoNotRecordFailures(t *testing.T) {
 			}
 			assertProxyFailures(t, r, 0)
 		})
+	}
+}
+
+// 同一账号的请求固定命中同一代理；不同账号分散到不同代理。
+func TestProxyRouterBindsAccountToProxy(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		io.WriteString(w, "ok")
+	}))
+	defer origin.Close()
+	var hits [2]atomic.Int32
+	var proxies [2]*httptest.Server
+	for i := range 2 {
+		i := i
+		proxies[i] = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			hits[i].Add(1)
+			out := req.Clone(req.Context())
+			out.RequestURI = ""
+			resp, err := http.DefaultTransport.RoundTrip(out)
+			if err != nil {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			defer resp.Body.Close()
+			w.WriteHeader(resp.StatusCode)
+			io.Copy(w, resp.Body)
+		}))
+		defer proxies[i].Close()
+	}
+	r := newTestProxyRouter(t, proxies[0].URL, proxies[1].URL)
+	for _, uid := range []string{"acct-a", "acct-b"} {
+		for range 3 {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, origin.URL, nil)
+			bindAccountToRequest(req, &auth.Auth{UID: uid})
+			resp, err := r.RoundTrip(req)
+			if err != nil {
+				cancel()
+				t.Fatalf("%s: %v", uid, err)
+			}
+			_, readErr := io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			cancel()
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+		}
+	}
+	aAddr, ok := r.pool.BindingOf("acct-a")
+	if !ok {
+		t.Fatal("acct-a has no proxy binding")
+	}
+	bAddr, ok := r.pool.BindingOf("acct-b")
+	if !ok {
+		t.Fatal("acct-b has no proxy binding")
+	}
+	if aAddr == bAddr {
+		t.Fatalf("two accounts share one proxy: %s", aAddr)
+	}
+	if hits[0].Load() != 3 || hits[1].Load() != 3 {
+		t.Fatalf("requests not bound per account: hits=%d/%d", hits[0].Load(), hits[1].Load())
+	}
+	views, _ := r.pool.Snapshot()
+	for _, v := range views {
+		if v.Bound != 1 {
+			t.Fatalf("each proxy should bind exactly one account: %+v", views)
+		}
 	}
 }

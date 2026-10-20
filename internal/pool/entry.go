@@ -84,6 +84,9 @@ type Status struct {
 	// Realm 账号域（cn/global，auth.Realm() 计算值；含 global.enabled 开关闸）。
 	// 供面板/状态接口按域分组展示。
 	Realm           string     `json:"realm,omitempty"`
+	// Proxy 该账号绑定的出站代理展示地址（host:port，不含凭据）。由面板装配层
+	// 按 proxypool 绑定表填充；账号池本身不感知代理（未启用代理时为空）。
+	Proxy           string     `json:"proxy,omitempty"`
 	// Enterprise 企业版账号（auth.EnterpriseID 非空，计算值不落盘）。
 	// 企业版无个人成长体系（签到/成长任务/连登/旅行/夜猫子 上游均拒），
 	// 面板据此隐藏对应按钮；选号、保活、额度展示不受影响。

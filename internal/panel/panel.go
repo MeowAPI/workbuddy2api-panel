@@ -241,6 +241,16 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.StickyCount != nil {
 		sticky = p.cfg.StickyCount()
 	}
+	accounts := p.cfg.Pool.List()
+	// 账号行标注绑定的出口代理（host:port）。只读填充，不触发新分配：
+	// 尚未发过请求的账号不会因为打开面板而被绑定。
+	if p.cfg.ProxyPool.Enabled() {
+		for i := range accounts {
+			if addr, ok := p.cfg.ProxyPool.BindingOf(accounts[i].UID); ok {
+				accounts[i].Proxy = addr
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":         p.cfg.Version,
 		"uptime_sec":      int(time.Since(p.started).Seconds()),
@@ -253,7 +263,7 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"disabled":        disabled,
 		"paused":          paused,
 		"in_flight_full":  inFlightFull,
-		"accounts":        p.cfg.Pool.List(),
+		"accounts":        accounts,
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久）：
 		// 与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
 		"model_locks": p.cfg.Pool.ModelLockView(),
@@ -269,7 +279,11 @@ func (p *Panel) proxyOverview() any {
 		return nil
 	}
 	views, picks := p.cfg.ProxyPool.Snapshot()
-	return map[string]any{"proxies": views, "picks": picks}
+	return map[string]any{
+		"proxies":      views,
+		"picks":        picks,
+		"bind_account": p.cfg.ProxyPool.BindAccount(),
+	}
 }
 
 

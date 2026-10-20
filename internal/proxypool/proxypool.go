@@ -125,6 +125,15 @@ func (p Proxy) String() string {
 	return u.String()
 }
 
+// Display 返回 host:port 形态的展示地址（不含协议与凭据），
+// 面板账号行标注「该账号固定从哪个出口出去」用。
+func (p Proxy) Display() string {
+	if p.url == nil {
+		return ""
+	}
+	return p.url.Host
+}
+
 // Pool 代理池。零值不可用；用 New 构建。
 type Pool struct {
 	mu      sync.Mutex
@@ -137,6 +146,12 @@ type Pool struct {
 	frozen   []time.Time
 	lastPick []time.Time
 	picks    int64
+
+	// 按账号绑定出口（bind_account）：uid → 代理下标，bound[i] 为该代理
+	// 已绑定的账号数。绑定在进程内首次见到 uid 时分配，重启后重新分配。
+	bind     bool
+	bindings map[string]int
+	bound    []int
 }
 
 // New 按配置列表构建。raw 里的空行跳过；任一条非法直接报错（fail fast）。
@@ -163,6 +178,9 @@ func New(raw []string) (*Pool, error) {
 	p.failures = make([]int, len(p.proxies))
 	p.frozen = make([]time.Time, len(p.proxies))
 	p.lastPick = make([]time.Time, len(p.proxies))
+	p.bind = true // 缺省按账号绑定；配置显式 false 时由 SetBindAccount 关闭
+	p.bindings = map[string]int{}
+	p.bound = make([]int, len(p.proxies))
 	return p, nil
 }
 
@@ -177,6 +195,27 @@ func (p *Pool) Len() int {
 	return len(p.proxies)
 }
 
+// BindAccount 报告是否按账号绑定出口代理（缺省 true）。
+func (p *Pool) BindAccount() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.bind
+}
+
+// SetBindAccount 热切换绑定模式。关闭时保留既有绑定（重新开启即恢复），
+// 不重建代理连接池；切换只影响后续请求的选路。
+func (p *Pool) SetBindAccount(enabled bool) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.bind = enabled
+}
+
 // Pick 轮转选择下一个可用代理；全池冷却中返回 nil，调用方须区分 Enabled。
 func (p *Pool) Pick() *Proxy {
 	if !p.Enabled() {
@@ -184,23 +223,106 @@ func (p *Pool) Pick() *Proxy {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.pickLocked(time.Now())
+}
+
+// PickFor 按账号选择出口代理：
+//   - 绑定模式且 uid 非空：同一账号固定使用首次分配的代理（不随请求轮转），
+//     首次分配选「已绑定账号数最少」的可用代理，尽量让账号分散到不同出口；
+//     绑定的代理冷却期间返回 nil——宁可该账号失败也不中途换 IP。
+//   - 绑定关闭或 uid 为空（无账号的探测请求）：回落普通轮转 Pick。
+func (p *Pool) PickFor(uid string) *Proxy {
+	if !p.Enabled() {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	now := time.Now()
+	if uid == "" || !p.bind {
+		return p.pickLocked(now)
+	}
+	if idx, ok := p.bindings[uid]; ok {
+		if !p.availableLocked(idx, now) {
+			return nil
+		}
+		p.notePickLocked(idx, now)
+		return &p.proxies[idx]
+	}
+	idx := p.leastBoundLocked(now)
+	if idx < 0 {
+		return nil
+	}
+	p.bindings[uid] = idx
+	p.bound[idx]++
+	p.notePickLocked(idx, now)
+	return &p.proxies[idx]
+}
+
+// BindingOf 返回当前生效的代理展示地址（host:port，无凭据）。
+// 关闭绑定时隐藏保留的分配；查询不会触发新分配。
+func (p *Pool) BindingOf(uid string) (string, bool) {
+	if p == nil || uid == "" {
+		return "", false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.bind {
+		return "", false
+	}
+	idx, ok := p.bindings[uid]
+	if !ok {
+		return "", false
+	}
+	return p.proxies[idx].Display(), true
+}
+
+// pickLocked 持锁轮转选一个可用代理（跳过冷却条目）。
+func (p *Pool) pickLocked(now time.Time) *Proxy {
 	n := len(p.proxies)
 	for i := range n {
 		idx := (p.next + i) % n
-		if t := p.frozen[idx]; !t.IsZero() {
-			if now.Before(t) {
-				continue
-			}
-			p.frozen[idx] = time.Time{}
-			p.failures[idx] = 0
+		if !p.availableLocked(idx, now) {
+			continue
 		}
-		p.next = (p.next + i + 1) % n
-		p.lastPick[idx] = now
-		p.picks++
+		p.notePickLocked(idx, now)
 		return &p.proxies[idx]
 	}
 	return nil
+}
+
+// availableLocked 报告条目当前可用；冷却到期时顺带清零失败计数（惰性回收）。
+func (p *Pool) availableLocked(idx int, now time.Time) bool {
+	if t := p.frozen[idx]; !t.IsZero() {
+		if now.Before(t) {
+			return false
+		}
+		p.frozen[idx] = time.Time{}
+		p.failures[idx] = 0
+	}
+	return true
+}
+
+// leastBoundLocked 选已绑定账号数最少的可用代理（平手按轮转游标次序）。
+func (p *Pool) leastBoundLocked(now time.Time) int {
+	n := len(p.proxies)
+	best := -1
+	for i := range n {
+		idx := (p.next + i) % n
+		if !p.availableLocked(idx, now) {
+			continue
+		}
+		if best < 0 || p.bound[idx] < p.bound[best] {
+			best = idx
+		}
+	}
+	return best
+}
+
+// notePickLocked 记录选中：推进轮转游标并更新观测字段。
+func (p *Pool) notePickLocked(idx int, now time.Time) {
+	p.next = (idx + 1) % len(p.proxies)
+	p.lastPick[idx] = now
+	p.picks++
 }
 
 // NoteFail 记一次该代理上的请求失败。窗口内累计达 failThreshold → 冷却。
@@ -242,6 +364,8 @@ type View struct {
 	RecentFails int       `json:"recent_fails"`
 	LastPick    time.Time `json:"last_pick"`
 	Pickable    bool      `json:"pickable"`
+	// Bound 绑定到该代理的账号数（bind_account 模式；关闭时为 0）。
+	Bound int `json:"bound"`
 }
 
 // Snapshot 返回全部代理的观测状态与总选中次数。
@@ -256,6 +380,9 @@ func (p *Pool) Snapshot() (views []View, picks int64) {
 	for i := range p.proxies {
 		px := &p.proxies[i]
 		v := View{Raw: px.String(), Scheme: px.scheme, LastPick: p.lastPick[i]}
+		if p.bind {
+			v.Bound = p.bound[i]
+		}
 		if t := p.frozen[i]; !t.IsZero() && now.Before(t) {
 			v.Frozen = true
 			v.UnfreezeAt = t

@@ -153,9 +153,14 @@ type Config struct {
 	Proxy struct {
 		// List 出站代理列表。每条支持 http://[user:pass@]host:port、
 		// socks5://[user:pass@]host:port、socks5h://[...]（域名解析交代理端）。
-		// 非空即启用代理池：按请求轮转，10 分钟内累计 3 次传输失败冷却 5 分钟。
+		// 非空即启用代理池，选路由 BindAccount 决定；10 分钟内累计 3 次失败冷却 5 分钟。
 		// 全池冷却时请求失败，不回退直连。空列表 = 直连；修改列表需重启生效。
 		List []string `json:"list"`
+		// BindAccount 按账号绑定出口代理（缺省 true）：同一账号固定使用首次分配
+		// 的代理（首次出现时分配给已绑定账号数最少且可用的代理）。
+		// 绑定代理冷却时该账号请求失败；真实出口 IP 是否固定由代理服务决定。
+		// false = 每个请求轮转（旧行为）。可热切换，无需重启。
+		BindAccount bool `json:"bind_account"`
 	} `json:"proxy"`
 
 	Features struct {
@@ -280,6 +285,8 @@ func Default() *Config {
 	// Global.Enabled 缺省 true（纯 CN 行为不变：CN 账号恒判 cn，global base 不被使用）；
 	// ChatBase/BillingBase 缺省空（回落内置默认）。
 	c.Global.Enabled = true
+	// 缺省按账号绑定代理地址；显式 false 回到按请求轮转。
+	c.Proxy.BindAccount = true
 	c.Features.SanitizeBlacklistFingerprints = true
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：透传客户端原始 system（对齐上游；custom 由用户显式选择）
 	c.Pool.MaxInFlight = 3
@@ -461,6 +468,11 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_PROXY_LIST"); v != "" {
 		// 逗号/分号分隔；凭据中的分隔符必须使用 URL 百分号编码。
 		c.Proxy.List = strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ';' })
+	}
+	if v := os.Getenv("WB2A_PROXY_BIND_ACCOUNT"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Proxy.BindAccount = b
+		}
 	}
 }
 

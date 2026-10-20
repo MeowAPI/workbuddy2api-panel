@@ -169,8 +169,13 @@ func main() {
 		log.Fatalf("load proxy pool: %v", err)
 	}
 	if proxyPool.Enabled() {
+		proxyPool.SetBindAccount(cfg.Proxy.BindAccount)
 		up.SetProxyPool(proxyPool)
-		log.Printf("出站代理池已启用：%d 条（按请求轮转；10 分钟内累计 3 次失败冷却 5 分钟；全池冷却时拒绝直连）", proxyPool.Len())
+		mode := "按账号绑定出口"
+		if !cfg.Proxy.BindAccount {
+			mode = "按请求轮转"
+		}
+		log.Printf("出站代理池已启用：%d 条（%s；10 分钟内累计 3 次失败冷却 5 分钟；全池冷却时拒绝直连）", proxyPool.Len(), mode)
 	}
 	// auth 侧开关（auth.SetGlobalEnabled）是第二道闸，两者同 config global.enabled。
 	up.GlobalEnabled = cfg.Global.Enabled
@@ -295,7 +300,7 @@ func main() {
 			return Load(*cfgPath)
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
-			return saveConfig(raw, *cfgPath, live, p, up, sch)
+			return saveConfig(raw, *cfgPath, live, p, up, sch, proxyPool)
 		},
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
@@ -432,7 +437,7 @@ func panelListenPath(listen string) string {
 // 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
 // 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
-func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, pp *proxypool.Pool) ([]string, error) {
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
@@ -518,6 +523,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		!newCfg.Schedule.GrowthEnabled)
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
+	// 代理绑定模式热切换（代理列表本身仍需重启，见 restartRequiredFields）。
+	pp.SetBindAccount(newCfg.Proxy.BindAccount)
 
 	return restartRequiredFields(newCfg), nil
 }

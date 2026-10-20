@@ -15,8 +15,34 @@ import (
 	"net/url"
 	"sync"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/proxypool"
 )
+
+// accountCtxKey 请求上下文中的账号 uid 键（代理按账号绑定出口用）。
+// 走 context 而不是私有请求头：头会被发往上游，context 只在进程内可见。
+type accountCtxKey struct{}
+
+// bindAccountToRequest 把账号 uid 写入请求上下文（幂等，不改变出站报文）。
+// 通用头和手动构造的账号请求均在发送前挂载，不新增上游请求头。
+func bindAccountToRequest(req *http.Request, a *auth.Auth) {
+	if req == nil || a == nil || a.UID == "" {
+		return
+	}
+	if accountFromRequest(req) == a.UID {
+		return
+	}
+	*req = *req.WithContext(context.WithValue(req.Context(), accountCtxKey{}, a.UID))
+}
+
+// accountFromRequest 读取请求上下文里的账号 uid；无账号请求返回空串。
+func accountFromRequest(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+	uid, _ := req.Context().Value(accountCtxKey{}).(string)
+	return uid
+}
 
 // proxyRouter 代理感知 RoundTripper。
 type proxyRouter struct {
@@ -28,7 +54,7 @@ type proxyRouter struct {
 }
 
 var (
-	errProxyUnavailable = errors.New("proxy: all configured proxies are cooling down")
+	errProxyUnavailable = errors.New("proxy: no usable proxy available (all cooling down, or this account's bound proxy is cooling down)")
 	errProxyAuth        = errors.New("proxy: authentication required (HTTP 407)")
 )
 
@@ -70,7 +96,7 @@ func (r *proxyRouter) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		return nil, err
 	}
-	px := r.pool.Pick()
+	px := r.pool.PickFor(accountFromRequest(req))
 	if px == nil {
 		if !r.pool.Enabled() {
 			return r.direct.RoundTrip(req)

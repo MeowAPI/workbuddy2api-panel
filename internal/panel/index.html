@@ -1051,7 +1051,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <div class="hr"></div>
             <label class="fld"><span class="lb">出站代理池（每行一条，需重启生效）</span>
               <textarea name="proxy_list" rows="3" placeholder="http://user:pass@127.0.0.1:7890&#10;socks5://127.0.0.1:1080&#10;socks5h://host:1080"></textarea>
-              <span class="hint">支持 http / https / socks5 / socks5h，带认证写 user:pass@，socks5h 由代理解析域名。非空即启用：出站请求按代理轮转，单代理 10 分钟内累计失败 3 次冷却 5 分钟；全池冷却时请求报错，不会回退直连。留空 = 直连（默认）。修改列表后需重启生效。</span></label>
+              <span class="hint">支持 http / https / socks5 / socks5h，带认证写 user:pass@，SOCKS5 由代理解析目标域名。单代理 10 分钟内累计失败 3 次冷却 5 分钟；全池冷却时请求报错，不会回退直连。留空 = 直连。修改列表后需重启生效。</span></label>
+            <div class="switch"><span class="lb">按账号绑定代理地址</span>
+              <input type="checkbox" name="proxy_bind_account"></div>
+            <div class="hint">开启（默认）：账号首次请求时分配给已绑定账号数最少的可用代理，之后保持该代理；绑定代理冷却时请求失败，不自动换代理或直连。关闭后按请求轮转并隐藏绑定标签，重新开启恢复原分配。开关立即生效；重启后重新分配。绑定的是代理地址，不保证实际出口 IP 固定；固定 IP 需代理服务商支持。</div>
             <div class="grid2">
               <label class="fld"><span class="lb">系统提示词模式</span>
                 <select name="prompt_mode">

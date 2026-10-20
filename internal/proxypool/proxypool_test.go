@@ -327,3 +327,140 @@ func TestNoteFailRejectsCopiedAndOtherPoolEntries(t *testing.T) {
 		t.Fatal("foreign indices must not affect this pool")
 	}
 }
+
+// 按账号绑定：同一 uid 固定同一代理，不同账号尽量分散到不同代理。
+func TestPickForBindsAccount(t *testing.T) {
+	p, err := New([]string{"http://a:1", "http://b:2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := p.PickFor("u1")
+	if first == nil {
+		t.Fatal("binding pool should assign a proxy")
+	}
+	for range 5 {
+		if got := p.PickFor("u1"); got == nil || got.Raw != first.Raw {
+			t.Fatalf("account binding drifted: first=%s got=%v", first.Raw, got)
+		}
+	}
+	second := p.PickFor("u2")
+	if second == nil || second.Raw == first.Raw {
+		t.Fatalf("second account should spread to another proxy: %v", second)
+	}
+	if _, ok := p.BindingOf("u1"); !ok {
+		t.Fatal("BindingOf should report the assigned proxy")
+	}
+	views, _ := p.Snapshot()
+	total := 0
+	for _, v := range views {
+		total += v.Bound
+	}
+	if total != 2 {
+		t.Fatalf("bound account count = %d, want 2", total)
+	}
+}
+
+// 绑定代理冷却期间该账号失败关闭，不换 IP；其他账号不受影响，期满自动恢复。
+func TestPickForBoundCoolingFailsClosed(t *testing.T) {
+	p, err := New([]string{"http://a:1", "http://b:2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := p.PickFor("u1")
+	if a == nil || a.Raw != "http://a:1" {
+		t.Fatalf("u1 should bind a:1, got %v", a)
+	}
+	if b := p.PickFor("u2"); b == nil || b.Raw != "http://b:2" {
+		t.Fatalf("u2 should bind b:2, got %v", b)
+	}
+	for range failThreshold {
+		p.NoteFail(a)
+	}
+	if got := p.PickFor("u1"); got != nil {
+		t.Fatalf("bound proxy cooling must fail closed, got %v", got)
+	}
+	if got := p.PickFor("u2"); got == nil || got.Raw != "http://b:2" {
+		t.Fatalf("unrelated account must stay usable, got %v", got)
+	}
+	// 冷却期满：原绑定恢复。
+	p.mu.Lock()
+	p.frozen[a.index] = time.Now().Add(-time.Second)
+	p.mu.Unlock()
+	if got := p.PickFor("u1"); got == nil || got.Raw != "http://a:1" {
+		t.Fatalf("binding should resume after cooldown, got %v", got)
+	}
+}
+
+// 关闭绑定：同一账号按请求轮转，且不产生绑定记录。
+func TestBindAccountOffUsesRoundRobin(t *testing.T) {
+	p, err := New([]string{"http://a:1", "http://b:2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.SetBindAccount(false)
+	if p.BindAccount() {
+		t.Fatal("BindAccount should be false after SetBindAccount(false)")
+	}
+	seen := map[string]bool{}
+	for range 4 {
+		px := p.PickFor("u1")
+		if px == nil {
+			t.Fatal("pool should stay usable")
+		}
+		seen[px.Raw] = true
+	}
+	if len(seen) != 2 {
+		t.Fatalf("binding off should round robin, saw %v", seen)
+	}
+	if _, ok := p.BindingOf("u1"); ok {
+		t.Fatal("binding off must not record an assignment")
+	}
+}
+
+// 无账号请求（uid 为空）始终轮转，不占用绑定名额。
+func TestPickForAnonymousRoundRobin(t *testing.T) {
+	p, err := New([]string{"http://a:1", "http://b:2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for range 4 {
+		seen[p.PickFor("").Raw] = true
+	}
+	if len(seen) != 2 {
+		t.Fatalf("anonymous requests should round robin, saw %v", seen)
+	}
+	views, _ := p.Snapshot()
+	for _, v := range views {
+		if v.Bound != 0 {
+			t.Fatalf("anonymous requests must not bind: %+v", v)
+		}
+	}
+}
+
+// 并发首请求只产生一个绑定。
+func TestConcurrentPickForSingleBinding(t *testing.T) {
+	p, err := New([]string{"http://a:1", "http://b:2", "http://c:3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 50 {
+				p.PickFor("same-account")
+			}
+		}()
+	}
+	wg.Wait()
+	views, _ := p.Snapshot()
+	total := 0
+	for _, v := range views {
+		total += v.Bound
+	}
+	if total != 1 {
+		t.Fatalf("concurrent first picks created %d bindings, want 1", total)
+	}
+}

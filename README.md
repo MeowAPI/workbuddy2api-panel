@@ -378,7 +378,8 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `schedule.include_disabled_in_tasks` | `false` | 让**保号类**四任务（签到 / 活跃上报 / token 保活 / 余额刷新）对**已禁用**账号也执行——「禁用」只关选号，不停保号。`false`（默认）保持「禁用的跳过」 |
 | `upstream.timeout_seconds` | `120` | 短 RPC（刷新 / 签到 / 余额 / 模型列表）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
-| `proxy.list` | `[]` | 出站代理池：支持带认证的 HTTP / HTTPS / SOCKS5 / SOCKS5h 地址，必须显式指定端口；按请求轮转。10 分钟内累计 3 次传输失败冷却 5 分钟；全池冷却时返回错误，**不会回退直连**。空列表 = 直连；修改需重启 |
+| `proxy.list` | `[]` | 出站代理池：支持带认证的 HTTP / HTTPS / SOCKS5 / SOCKS5h 地址，必须显式指定端口。10 分钟内累计 3 次传输失败冷却 5 分钟；全池冷却时返回错误，**不会回退直连**。空列表 = 直连；修改需重启 |
+| `proxy.bind_account` | `true` | **按账号绑定代理地址**：首次请求分配到已绑定账号数最少的可用代理，后续保持该代理；代理冷却期间请求失败，不自动改用其他代理。`false` = 按请求轮转；可热切换。实际出口 IP 是否固定取决于代理服务 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
 | `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。官网「使用端」列按出站 UA 服务端归因；官方 WorkBuddy 桌面 UA 为 `WorkBuddy/<version>`，需要时可配 |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
@@ -419,6 +420,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 `WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_MAX_BODY_MB` · `WB2A_SOFT_RATE`(duration) · `WB2A_SOFT_RATE_MAX`(duration) · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_USER_AGENT` · `WB2A_SANITIZE_FINGERPRINTS`(bool) · `WB2A_PROMPT_MODE` · `WB2A_PROMPT_FILE`
 
 代理列表可由 `WB2A_PROXY_LIST` 覆盖，使用逗号或分号分隔；凭据中的这两种字符须做 URL 百分号编码。复杂密码建议直接配置 JSON 数组，避免分隔歧义。
+绑定开关也可由 `WB2A_PROXY_BIND_ACCOUNT`（`true` / `false`）覆盖。
 
 ### 出站代理池
 
@@ -429,16 +431,23 @@ curl -s http://localhost:7863/v1/chat/completions \
   "list": [
     "http://user:password@127.0.0.1:7890",
     "socks5h://127.0.0.1:1080"
-  ]
+  ],
+  "bind_account": true
 }
 ```
 
-- 作用于服务端共享上游客户端的聊天、刷新、签到、余额等请求；每次请求轮转，不绑定账号。HTTP/HTTPS 代理支持 CONNECT，SOCKS5 和 SOCKS5h 均由代理解析目标域名。
+- 作用于服务端共享上游客户端的聊天、刷新、签到、余额等全部账号请求。HTTP/HTTPS 代理支持 CONNECT，SOCKS5 和 SOCKS5h 均由代理解析目标域名。
+- **按账号绑定代理地址（`bind_account`，默认开启）**：账号首次请求分配到「已绑定账号数最少」的可用代理，之后聊天、领奖（包括小程序转 Web 领奖）与保号类请求保持同一代理。可用代理条目足够时分散到不同条目，账号更多时按绑定数量均摊。
+  - 这里固定的是代理 URL，不是探测到的公网出口 IP。不同代理地址可能共享出口，单个代理也可能动态换 IP；需要固定或独立 IP 时，请使用代理服务商提供的固定出口，网关无法替其保证。
+  - 绑定代理冷却时，该账号请求失败，不自动换代理、不直连；冷却期满继续使用原绑定。
+  - 关闭开关立即恢复按请求轮转，账号行隐藏绑定标签，概览的生效绑定数归零；内存中的分配保留，重新开启后恢复，不绕过原代理的冷却。
+  - 绑定表不落盘，重启后重新分配。账号行的 `host:port` 是代理地址；「出站代理」卡片悬停显示当前选路模式、绑定数和冷却情况。
 - 地址规范化后去重，协议及主机名不区分大小写。地址必须包含 `host:port`，不接受业务路径、查询参数和片段；非法配置在启动或保存时拒绝。
 - **安全变更：全池冷却时明确失败，不再像旧版自动直连。** 只有清空列表并重启后才恢复直连。代理层不自动重放请求，不额外放大非幂等请求。
 - 10 分钟内累计 3 次传输失败或代理认证失败（HTTP 407），该代理冷却 5 分钟后自动参与轮转。调用方取消／context deadline 不计失败；其他上游 HTTP 业务响应不影响代理健康度。没有后台主动探测，因此「可用」表示当前可参与轮转，不保证网络已探通。
-- 账号页「出站代理」显示可用数 / 总数，悬停查看脱敏地址、近期失败与冷却时间。错误和概览不展示代理用户名、密码；受鉴权保护的配置编辑页仍保留完整凭据，请保护 `config.json` 和面板 API 密钥。
-- 清空输入框会保存 `[]`；列表新增、删除和清空均需重启，运行期计数与冷却状态不落盘。
+- 单代理失败仅清理该代理的空闲连接，不再连带清空其他代理的连接池；聊天的账号上下文与调用方取消信号一起保留，客户端取消不误计代理故障。
+- 错误和概览不展示代理用户名、密码；受鉴权保护的配置编辑页仍保留完整凭据，请保护 `config.json` 和面板 API 密钥。
+- 清空输入框会保存 `[]`；列表新增、删除和清空均需重启，运行期计数、绑定与冷却状态不落盘。
 
 
 ## 核心行为语义

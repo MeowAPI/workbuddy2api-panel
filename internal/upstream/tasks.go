@@ -230,6 +230,7 @@ func (c *Client) ClaimReward(a *auth.Auth, taskCode string) (credit, energy int6
 	if err != nil {
 		return 0, 0, err
 	}
+	bindAccountToRequest(req, a)
 	// Web 端请求头形状（对照浏览器实际请求）：Origin/Referer 指向 workbuddy.cn 成长中心，
 	// 带 x-client-platform: web 标记来源端。
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())

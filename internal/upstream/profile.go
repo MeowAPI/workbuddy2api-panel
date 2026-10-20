@@ -24,6 +24,7 @@ func (c *Client) FetchAccountProfile(a *auth.Auth) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	bindAccountToRequest(req, a)
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("x-client-platform", "web")

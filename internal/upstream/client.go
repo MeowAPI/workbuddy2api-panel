@@ -1028,23 +1028,24 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	// 尾部不可达 cancel() 是潜伏 nil-panic，已删；chatPaths 恒非空由构造保证）。
 	for _, path := range c.chatPaths(a) {
 		endpoint := c.chatBase(a) + path
-		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(prepared))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(prepared))
 		if err != nil {
 			return nil, 0, nil, err
 		}
 		c.ChatHeaders(req, a, clientIP, meta)
-		// 从调用方 ctx 派生：保留取消传播（父 ctx 取消 → 本 ctx 取消），
-		// 同时 monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
-		reqCtx, cancel := context.WithCancel(ctx)
+		// 从已携带账号标识的请求 context 派生，保留父请求取消与账号绑定。
+		// monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
+		reqCtx, cancel := context.WithCancel(req.Context())
 		req = req.WithContext(reqCtx)
 		resp, err := c.chatHTTP().Do(req)
 		if err != nil {
 			cancel()
 			log.Printf("ERR: [upstream] chat_stream acct=%s: transport error: %v", logfmt.Label(a.UID, a.Nickname), err)
-			// 传输层失败 → 清空共享连接池的空闲连接（连接层加固）：失败连接可能仍
-			// 留在空闲池里，下一个请求会继续捡到它——仅靠 IdleConnTimeout 等过期
-			// 不够，主动清池才断根。
-			roundTripCloseIdle(c.chatHTTP().Transport)
+			// 代理路由已清理发生故障的 transport；不能再清掉其他健康代理的连接。
+			// 未使用代理时保留原有直连失败清池逻辑。
+			if _, managed := c.chatHTTP().Transport.(*proxyRouter); !managed {
+				roundTripCloseIdle(c.chatHTTP().Transport)
+			}
 			return nil, 0, nil, err
 		}
 		if resp.StatusCode >= 400 {
@@ -1666,6 +1667,7 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 	if err != nil {
 		return nil, err
 	}
+	bindAccountToRequest(req, a)
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	// AccessToken 加锁快照（同 fetchEnterpriseModels）。

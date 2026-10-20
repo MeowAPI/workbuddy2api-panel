@@ -54,7 +54,8 @@
     "passthrough_ip": false
   },
   "proxy": {
-    "list": []
+    "list": [],
+    "bind_account": true
   },
   "features": {
     "sanitize_blacklist_fingerprints": true

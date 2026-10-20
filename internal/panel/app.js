@@ -423,7 +423,7 @@ function renderAccounts(list) {
     const usageTitle = '最近一次：' + req + ' 次 / ' + totalTok + ' / 延迟 ' + latency + ' / ' + rate;
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
-      '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
+      '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + (s.proxy ? ' <span class="realm-tag" title="当前绑定的代理地址；实际出口 IP 由代理服务决定">' + esc(s.proxy) + '</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
       '<td>' + tag + note + rateLimits + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
@@ -468,11 +468,13 @@ function renderProxyStat(d) {
   const ok = d.proxies.filter(p => p.pickable).length;
   el.textContent = ok + '/' + d.proxies.length;
   el.style.color = ok === 0 ? 'var(--bad)' : (ok < d.proxies.length ? 'var(--warn)' : 'var(--ok)');
+  const mode = d.bind_account ? '按账号绑定代理' : '按请求轮转';
   const lines = d.proxies.map(p =>
-    p.raw + (p.frozen ? '（冷却至 ' + fmtLocalDateTime(parseAPITime(p.unfreeze_at)) + '）' : (p.pickable ? '' : ''))
+    p.raw + (p.frozen ? '（冷却至 ' + fmtLocalDateTime(parseAPITime(p.unfreeze_at)) + '）' : '')
+      + (d.bind_account && p.bound ? '  绑定 ' + p.bound + ' 个账号' : '')
       + (p.recent_fails ? '  近期失败 ' + p.recent_fails : ''));
   const card = $('proxyStat');
-  if (card) card.title = '累计选中 ' + (d.picks || 0) + ' 次\n' + lines.join('\n');
+  if (card) card.title = mode + ' · 累计选中 ' + (d.picks || 0) + ' 次\n' + lines.join('\n');
 }
 
 // renderModelLocks 模型锁池：哪些模型不能用、锁了几个号、还要锁多久。
@@ -1011,6 +1013,7 @@ const CFG_MAP = {
   ttl: ['session_sticky', 'ttl'],
   timeout_seconds: ['upstream', 'timeout_seconds'], header_timeout_seconds: ['upstream', 'header_timeout_seconds'],
   proxy_list: ['proxy', 'list'],
+  proxy_bind_account: ['proxy', 'bind_account'],
   idle_timeout_seconds: ['upstream', 'idle_timeout_seconds'], user_agent: ['upstream', 'user_agent'],
   prompt_mode: ['prompt', 'mode'], prompt_file: ['prompt', 'file'],
   sanitize_blacklist_fingerprints: ['features', 'sanitize_blacklist_fingerprints'],
