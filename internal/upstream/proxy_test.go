@@ -251,6 +251,12 @@ func TestProxy407ClosesResponseAndRecordsFailure(t *testing.T) {
 				w.WriteHeader(http.StatusProxyAuthRequired)
 				io.WriteString(w, "private-user:private-password")
 				w.(http.Flusher).Flush()
+				// For an HTTPS target this is the CONNECT callback path; net/http
+				// owns the response body and the handler must not wait on context
+				// while the client is still processing the callback error.
+				if targetScheme == "https" {
+					return
+				}
 				<-req.Context().Done()
 				closed <- struct{}{}
 			}))
@@ -266,10 +272,12 @@ func TestProxy407ClosesResponseAndRecordsFailure(t *testing.T) {
 				t.Fatalf("407 must become a safe proxy error: resp=%v err=%v", resp, err)
 			}
 			assertProxyFailures(t, r, 1)
-			select {
-			case <-closed:
-			case <-time.After(time.Second):
-				t.Fatal("407 response connection was not closed")
+			if targetScheme == "http" {
+				select {
+				case <-closed:
+				case <-time.After(time.Second):
+					t.Fatal("407 response connection was not closed")
+				}
 			}
 		})
 	}

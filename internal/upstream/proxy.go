@@ -163,6 +163,9 @@ func (r *proxyRouter) transportFor(px *proxypool.Proxy) *http.Transport {
 	onConnect := tr.OnProxyConnectResponse
 	tr.OnProxyConnectResponse = func(ctx context.Context, proxyURL *url.URL, connectReq *http.Request, connectRes *http.Response) error {
 		if connectRes.StatusCode == http.StatusProxyAuthRequired {
+			// net/http owns the CONNECT response body while this callback runs;
+			// returning the typed error lets Transport tear down the CONNECT path
+			// without synchronously draining a potentially large response body.
 			return errProxyAuth
 		}
 		if onConnect != nil {
