@@ -228,7 +228,7 @@ process.stdout.write(JSON.stringify({
 	}
 }
 
-// A rate-limited account must not interrupt overview rendering, including quiet refreshes.
+// Run both complete scripts so real helpers and initialization participate in rendering.
 func TestAppJSOverviewRendersRateLimitedAccounts(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -238,13 +238,20 @@ func TestAppJSOverviewRendersRateLimitedAccounts(t *testing.T) {
 const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
-function region(from, to) {
-  const start = src.indexOf(from), end = src.indexOf(to, start);
-  assert.ok(start >= 0 && end > start, 'missing source region: ' + from);
-  return src.slice(start, end);
-}
+const mobile = fs.readFileSync('mobile.js', 'utf8');
+const html = fs.readFileSync('index.html', 'utf8');
 const sinks = {};
-const $ = id => sinks[id] || (sinks[id] = { innerHTML: '', textContent: '', hidden: true, style: {} });
+function element() {
+  return {
+    innerHTML: '', textContent: '', hidden: true, style: {}, dataset: {}, value: '', children: [],
+    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    addEventListener() {}, setAttribute() {}, removeAttribute() {}, focus() {}, remove() {},
+    querySelectorAll() { return []; }, querySelector() { return null; },
+    appendChild(child) { this.children.push(child); },
+  };
+}
+for (const match of html.matchAll(/\bid="([^"]+)"/g)) sinks[match[1]] = element();
+const $ = id => sinks[id];
 const now = Date.now();
 const until = new Date(now + 3600000).toISOString();
 const resetAt = new Date(now + 7200000).toISOString();
@@ -263,18 +270,27 @@ const overview = {
 let requests = 0;
 const errors = [];
 const ctx = {
-  $, lastPackages: null, lastPackagesAt: 0, EXP_FRESH_MS: 120000, overviewData: null,
-  remarkName: (uid, html) => html,
-  fmtTok: n => String(n),
-  api: async path => { assert.equal(path, 'overview'); requests++; return overview; },
-  toast: message => errors.push(message),
+  document: {
+    getElementById: id => sinks[id] || null, querySelectorAll: () => [], querySelector: () => null,
+    documentElement: element(), head: element(), body: element(), createElement: element,
+    addEventListener() {},
+  },
+  localStorage: { getItem: () => null, setItem() {} },
+  location: { hash: '#accounts' }, history: { replaceState() {} },
+  navigator: { clipboard: { writeText: async () => {} } },
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  addEventListener() {}, removeEventListener() {},
+  MutationObserver: class { observe() {} },
+  setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, clearTimeout() {},
+  fetch: () => new Promise(() => {}),
+  console: { log() {}, warn: e => errors.push(String(e)), error: e => errors.push(String(e)) },
+  URL, URLSearchParams, TextEncoder,
 };
+ctx.window = ctx;
 vm.createContext(ctx);
-vm.runInContext("'use strict';\n" +
-  region('function esc(', 'const TRANGE_PRESETS') +
-  region('function rateLimitMeta(', 'function openKey(') +
-  region('function renderAccounts(', "$('accBody').addEventListener") +
-  region('function expBatches(', 'async function loadExpiry'), ctx);
+vm.runInContext(src, ctx, { filename: 'app.js' });
+vm.runInContext(mobile, ctx, { filename: 'mobile.js' });
+ctx.api = async path => { assert.equal(path, 'overview'); requests++; return overview; };
 async function check(quiet, row) {
   accounts[0].rate_limited_models = [row];
   for (const id of ['accBody', 'mlBody', 'expList']) $(id).innerHTML = '';
@@ -286,7 +302,8 @@ async function check(quiet, row) {
   assert.ok($('mlBody').innerHTML.includes('glm-5.3'), 'locked model');
   assert.equal(($('expList').innerHTML.match(/class="exp-row"/g) || []).length, 8, 'expiry rows');
   assert.equal($('expBox').hidden, false, 'expiry card visibility');
-  assert.equal(ctx.overviewData, overview);
+  assert.equal(vm.runInContext('overviewData', ctx), overview);
+  assert.equal($('toasts').children.length, 0, 'render errors');
   assert.deepEqual(errors, []);
 }
 (async () => {

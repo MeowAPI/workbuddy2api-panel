@@ -11,7 +11,10 @@
 package panel
 
 import (
+	"bytes"
+	"crypto/sha256"
 	_ "embed"
+	"fmt"
 	"net/http"
 )
 
@@ -26,6 +29,23 @@ var mobileCSS []byte
 
 //go:embed mobile.js
 var mobileJS []byte
+
+var versionedIndexHTML = func() []byte {
+	html := indexHTML
+	for _, asset := range []struct {
+		name string
+		body []byte
+	}{
+		{"app.js", appJS},
+		{"mobile.js", mobileJS},
+		{"mobile.css", mobileCSS},
+	} {
+		version := fmt.Sprintf("%x", sha256.Sum256(asset.body))[:12]
+		html = bytes.ReplaceAll(html, []byte(`"`+asset.name+`"`),
+			[]byte(`"`+asset.name+`?v=`+version+`"`))
+	}
+	return html
+}()
 
 // csp 内容安全策略（严格版，无需 unsafe-inline）：
 //   - default-src 'none'        默认全禁，逐个开口
@@ -44,6 +64,8 @@ const csp = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inl
 
 // setSecurityHeaders 写入面板统一安全响应头（页面与 API 都要，API 也含 JSON 数据）。
 func setSecurityHeaders(w http.ResponseWriter) {
+	// Prevent browsers and CDNs from keeping older panel scripts after deployments.
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Security-Policy", csp)
 	w.Header().Set("X-Content-Type-Options", "nosniff") // 禁 MIME 嗅探
 	w.Header().Set("X-Frame-Options", "DENY")           // 老浏览器兜底（CSP frame-ancestors 的等价项）
@@ -57,7 +79,7 @@ func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(indexHTML)
+	_, _ = w.Write(versionedIndexHTML)
 }
 
 // appScript 输出前端逻辑（同源脚本，供 CSP script-src 'self' 加载）。

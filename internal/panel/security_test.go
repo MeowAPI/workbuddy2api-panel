@@ -1,8 +1,12 @@
 package panel
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -18,6 +22,9 @@ func TestSecurityHeadersOnAllPanelResponses(t *testing.T) {
 	paths := []struct{ method, path string }{
 		{"GET", "/panel/"},
 		{"GET", "/panel/app.js"},
+		{"HEAD", "/panel/app.js"},
+		{"GET", "/panel/mobile.js"},
+		{"GET", "/panel/mobile.css"},
 		{"GET", "/panel/api/overview"}, // 401（未提供 key）
 		{"POST", "/panel/api/config"},  // 401
 		{"GET", "/panel/api/nonexistent"},
@@ -37,6 +44,9 @@ func TestSecurityHeadersOnAllPanelResponses(t *testing.T) {
 		}
 		if h.Get("Referrer-Policy") != "no-referrer" {
 			t.Errorf("%s %s: Referrer-Policy=%q", c.method, c.path, h.Get("Referrer-Policy"))
+		}
+		if h.Get("Cache-Control") != "no-store" {
+			t.Errorf("%s %s: Cache-Control=%q want no-store", c.method, c.path, h.Get("Cache-Control"))
 		}
 	}
 }
@@ -70,12 +80,40 @@ func TestIndexReferencesExternalScript(t *testing.T) {
 	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
 	body := rec.Body.String()
 
-	if !strings.Contains(body, `<script src="app.js"></script>`) {
+	if !regexp.MustCompile(`<script src="app\.js\?v=[a-f0-9]{12}"></script>`).MatchString(body) {
 		t.Error("index.html must load app.js externally (inline script is blocked by CSP)")
 	}
 	// 反例保护：出现内联 <script>...</script> 内容块即为回归
 	if strings.Contains(body, "<script>\n") || strings.Contains(body, "<script> ") {
 		t.Error("index.html still contains an inline <script> block; CSP would block it")
+	}
+}
+
+// Resource URLs must change with their content so cached scripts from older deployments are not reused.
+func TestIndexVersionsStaticAssets(t *testing.T) {
+	p := newTestPanel()
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
+	refs := regexp.MustCompile(`(?:src|href)="((?:app\.js|mobile\.js|mobile\.css)\?v=[a-f0-9]{12})"`).FindAllStringSubmatch(rec.Body.String(), -1)
+	if len(refs) != 3 {
+		t.Fatalf("versioned asset references=%d want 3", len(refs))
+	}
+	for _, ref := range refs {
+		t.Run(ref[1], func(t *testing.T) {
+			u, err := url.Parse(ref[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			asset := httptest.NewRecorder()
+			p.ServeHTTP(asset, httptest.NewRequest("GET", "/panel/"+ref[1], nil))
+			if asset.Code != http.StatusOK {
+				t.Fatalf("asset status=%d", asset.Code)
+			}
+			want := fmt.Sprintf("%x", sha256.Sum256(asset.Body.Bytes()))[:12]
+			if got := u.Query().Get("v"); got != want {
+				t.Fatalf("asset version=%q want content hash %q", got, want)
+			}
+		})
 	}
 }
 
