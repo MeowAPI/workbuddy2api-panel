@@ -179,7 +179,7 @@ process.stdout.write(JSON.stringify({
 	}
 }
 
-// 模型限流时间必须同时支持上游 reset_at、网关 until 和无重置时间三种形态。
+// 模型限流时间在与 app.js 一致的严格模式下覆盖各时间分支。
 func TestAppJSRateLimitMeta(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -193,15 +193,19 @@ const end = src.indexOf('function rateLimitRowsHtml');
 if (start < 0 || end < 0) throw new Error('rate limit helpers not found');
 const ctx = { Date, Number, String, Math };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.rateLimitMeta=rateLimitMeta;', ctx);
+vm.runInContext("'use strict';\n" + src.slice(start, end) + '\nthis.rateLimitMeta=rateLimitMeta;', ctx);
 const now = new Date(2026, 8, 28, 14, 0, 0).getTime();
 const reset = new Date(2026, 8, 28, 16, 0, 0).getTime();
 const until = new Date(2026, 8, 28, 15, 0, 0).getTime();
 const rate = ctx.rateLimitMeta({ model: 'glm-5.3', kind: 'rate_limit', reset_at: new Date(reset).toISOString(), until: new Date(until).toISOString() }, now);
+const resetOnly = ctx.rateLimitMeta({ model: 'glm-5.3', reset_at: new Date(reset).toISOString() }, now);
+const untilOnly = ctx.rateLimitMeta({ model: 'glm-5.3', until: new Date(until).toISOString() }, now);
 const unavailable = ctx.rateLimitMeta({ model: 'missing', kind: 'model_unavailable', until: new Date(until).toISOString() }, now);
 const unknown = ctx.rateLimitMeta({ model: 'glm-5.3', kind: 'rate_limit' }, now);
 process.stdout.write(JSON.stringify({
   rate: rate.detail,
+  resetOnly: resetOnly.detail,
+  untilOnly: untilOnly.detail,
   unavailable: unavailable.detail,
   unknown: unknown.detail,
 }));`
@@ -218,9 +222,100 @@ process.stdout.write(JSON.stringify({
 		t.Fatalf("rate-limit formatting node test failed: %v\n%s", err, out)
 	}
 	// issue #171 问题二：until < resetAt 时主文字双时刻明示、倒计时跟随 until。
-	const want = `{"rate":"网关 2026-09-28 15:00 起重试（剩余 1时00分） · 上游称 2026-09-28 16:00 恢复","unavailable":"预计 1时00分 后重试","unknown":"预计解封时间未知"}`
+	const want = `{"rate":"网关 2026-09-28 15:00 起重试（剩余 1时00分） · 上游称 2026-09-28 16:00 恢复","resetOnly":"预计 2026-09-28 16:00 解封（剩余 2时00分）","untilOnly":"预计 2026-09-28 15:00 恢复（剩余 1时00分）","unavailable":"预计 1时00分 后重试","unknown":"预计解封时间未知"}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("rate-limit formatting=%s want %s", out, want)
+	}
+}
+
+// A rate-limited account must not interrupt overview rendering, including quiet refreshes.
+func TestAppJSOverviewRendersRateLimitedAccounts(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; overview rendering test skipped")
+	}
+	script := `const assert = require('node:assert/strict');
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+function region(from, to) {
+  const start = src.indexOf(from), end = src.indexOf(to, start);
+  assert.ok(start >= 0 && end > start, 'missing source region: ' + from);
+  return src.slice(start, end);
+}
+const sinks = {};
+const $ = id => sinks[id] || (sinks[id] = { innerHTML: '', textContent: '', hidden: true, style: {} });
+const now = Date.now();
+const until = new Date(now + 3600000).toISOString();
+const resetAt = new Date(now + 7200000).toISOString();
+const accounts = Array.from({ length: 8 }, (_, i) => ({
+  uid: 'account-' + i, nickname: 'Account ' + i, credits: 100, credits_total: 200,
+  credits_expiry_buckets: [{ date: new Date(now + 86400000).toISOString().slice(0, 10), remain: 100 }],
+}));
+const overview = {
+  total: 8, healthy: 8, cooling: 0, disabled: 0, paused: 0, sticky_sessions: 0,
+  version: 'test', uptime_sec: 60, accounts,
+  model_locks: [{
+    model: 'glm-5.3', realm: 'global', state: 'partial', total: 8, servable: 7, locked: 1,
+    unlock_at: until, fully_unlock_at: until, reason: 'rate limit',
+  }],
+};
+let requests = 0;
+const errors = [];
+const ctx = {
+  $, lastPackages: null, lastPackagesAt: 0, EXP_FRESH_MS: 120000, overviewData: null,
+  remarkName: (uid, html) => html,
+  fmtTok: n => String(n),
+  api: async path => { assert.equal(path, 'overview'); requests++; return overview; },
+  toast: message => errors.push(message),
+};
+vm.createContext(ctx);
+vm.runInContext("'use strict';\n" +
+  region('function esc(', 'const TRANGE_PRESETS') +
+  region('function rateLimitMeta(', 'function openKey(') +
+  region('function renderAccounts(', "$('accBody').addEventListener") +
+  region('function expBatches(', 'async function loadExpiry'), ctx);
+async function check(quiet, row) {
+  accounts[0].rate_limited_models = [row];
+  for (const id of ['accBody', 'mlBody', 'expList']) $(id).innerHTML = '';
+  $('expBox').hidden = true;
+  await ctx.loadOverview(quiet);
+  assert.equal(($('accBody').innerHTML.match(/<tr\b/g) || []).length, 8, 'account rows');
+  assert.ok($('accBody').innerHTML.includes('class="rate-limit '), 'rate limit explanation');
+  assert.equal(($('mlBody').innerHTML.match(/<tr>/g) || []).length, 1, 'model lock rows');
+  assert.ok($('mlBody').innerHTML.includes('glm-5.3'), 'locked model');
+  assert.equal(($('expList').innerHTML.match(/class="exp-row"/g) || []).length, 8, 'expiry rows');
+  assert.equal($('expBox').hidden, false, 'expiry card visibility');
+  assert.equal(ctx.overviewData, overview);
+  assert.deepEqual(errors, []);
+}
+(async () => {
+  for (const quiet of [false, true]) {
+    for (const row of [
+      { model: 'glm-5.3', reset_at: resetAt, until },
+      { model: 'glm-5.3', reset_at: resetAt },
+      { model: 'glm-5.3', until },
+      { model: 'glm-5.3' },
+      { model: 'glm-5.3', kind: 'model_unavailable', until },
+    ]) await check(quiet, row);
+  }
+  assert.equal(requests, 10);
+  process.stdout.write('OVERVIEW OK');
+})().catch(err => { console.error(err); process.exitCode = 1; });`
+	f, err := os.CreateTemp(t.TempDir(), "overview-render-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("overview rendering node test failed: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "OVERVIEW OK" {
+		t.Fatalf("overview rendering did not finish: %s", out)
 	}
 }
 
